@@ -16,6 +16,17 @@ By pushing a custom C++ daemon directly to your Android device via ADB and commu
 
 ---
 
+## 📸 Screenshots
+
+<div align="center">
+  <img src="public/ui.png" alt="SocketSweep Dashboard" width="45%" />
+  <img src="public/tree.png" alt="SocketSweep Treemap" width="45%" />
+  <br />
+  <p><em>Left: The Connection Dashboard | Right: The Interactive Treemap Visualization</em></p>
+</div>
+
+---
+
 ## 📥 Downloads
 
 **[Download SocketSweep v1.0.0 for macOS](https://github.com/VishnuSrivatsava/SocketSweep/releases/tag/v1.0.0)**
