@@ -154,3 +154,9 @@ If the daemon is killed immediately or throws `Permission denied`, ensure it is 
 ## 📄 License
 
 SocketSweep is released under the **GNU General Public License v3.0**. See the [LICENSE](LICENSE) file for more details.
+
+---
+
+## 👋 Author
+
+Built by **Vishnu Srivatsava**. Currently looking for Backend / Systems Engineering roles. Feel free to reach out on [LinkedIn](https://www.linkedin.com/in/vishnu-srivatsava-642222238/) or via [email](mailto:vishnusrivatsava@gmail.com).
