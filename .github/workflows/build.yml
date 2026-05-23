@@ -1,0 +1,174 @@
+name: Build SocketSweep
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            adb_url: https://dl.google.com/android/repository/platform-tools-latest-linux.zip
+          - os: macos-latest
+            platform: macos
+            adb_url: https://dl.google.com/android/repository/platform-tools-latest-darwin.zip
+          - os: windows-latest
+            platform: windows
+            adb_url: https://dl.google.com/android/repository/platform-tools-latest-windows.zip
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── System dependencies (Linux only) ──────────────────────────────────
+      # Tauri v2 requires GTK, WebKit, and related libraries on Linux.
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            patchelf
+
+      # ── Toolchain setup ───────────────────────────────────────────────────
+      # Rust is pre-installed on all GitHub Actions runners (ubuntu, windows,
+      # macos). No need for dtolnay/rust-toolchain — saves CI time.
+      # See: https://github.com/actions/runner-images
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      # ── Cross-compile C++ daemon for Android aarch64 ──────────────────────
+      # The daemon always targets Android ARM64, regardless of host OS.
+      # Uses the pre-installed Android NDK on GitHub Actions runners.
+      - name: Cross-compile C++ daemon (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          NDK="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
+          TOOLCHAIN=$(ls -d "$NDK/toolchains/llvm/prebuilt/"*/ | head -1)
+          CC="${TOOLCHAIN}bin/aarch64-linux-android31-clang++"
+
+          echo "NDK: $NDK"
+          echo "Compiler: $CC"
+
+          "$CC" \
+            -std=c++17 -O2 -Wall -Wextra -Wpedantic \
+            -fno-exceptions -fno-rtti -DNDEBUG \
+            -static-libstdc++ \
+            -o src-tauri/bin/daemon engine/daemon.cpp
+
+          file src-tauri/bin/daemon
+          echo "✓ C++ daemon cross-compiled for Android aarch64"
+
+      - name: Cross-compile C++ daemon (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $NDK = $env:ANDROID_NDK_LATEST_HOME
+          $Prebuilt = Get-ChildItem "$NDK\toolchains\llvm\prebuilt" -Directory | Select-Object -First 1
+          $CC = Join-Path $Prebuilt.FullName "bin\aarch64-linux-android31-clang++.cmd"
+
+          Write-Host "NDK: $NDK"
+          Write-Host "Compiler: $CC"
+
+          & $CC `
+            -std=c++17 -O2 -Wall -Wextra -Wpedantic `
+            -fno-exceptions -fno-rtti -DNDEBUG `
+            -static-libstdc++ `
+            -o src-tauri/bin/daemon engine/daemon.cpp
+
+          Write-Host "✓ C++ daemon cross-compiled for Android aarch64"
+
+      # ── Download platform-specific ADB from Google ────────────────────────
+      - name: Download ADB (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          curl -sL -o platform-tools.zip "${{ matrix.adb_url }}"
+          unzip -qo platform-tools.zip
+          cp platform-tools/adb src-tauri/bin/adb
+          chmod +x src-tauri/bin/adb
+          rm -rf platform-tools platform-tools.zip
+          echo "✓ ADB binary ready for ${{ matrix.platform }}"
+
+      - name: Download ADB (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "${{ matrix.adb_url }}" -OutFile platform-tools.zip
+          Expand-Archive platform-tools.zip -DestinationPath . -Force
+          Copy-Item platform-tools\adb.exe         src-tauri\bin\adb.exe
+          Copy-Item platform-tools\AdbWinApi.dll    src-tauri\bin\AdbWinApi.dll
+          Copy-Item platform-tools\AdbWinUsbApi.dll src-tauri\bin\AdbWinUsbApi.dll
+          Remove-Item -Recurse -Force platform-tools, platform-tools.zip
+          Write-Host "✓ ADB binaries ready for Windows"
+
+      # Windows ADB is adb.exe and requires companion DLLs.
+      # Patch tauri.conf.json to bundle the correct filenames.
+      - name: Patch Tauri config for Windows ADB
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $conf = Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+          $conf.bundle.resources = @(
+            "bin/adb.exe",
+            "bin/AdbWinApi.dll",
+            "bin/AdbWinUsbApi.dll",
+            "bin/daemon"
+          )
+          $conf | ConvertTo-Json -Depth 10 | Set-Content src-tauri/tauri.conf.json
+          Write-Host "✓ tauri.conf.json patched for Windows"
+
+      # ── Build Tauri desktop app ───────────────────────────────────────────
+      # This single command builds the React frontend (beforeBuildCommand),
+      # compiles the Rust bridge, and packages everything into native
+      # platform installers (.dmg / .deb / .AppImage / .msi / .exe).
+      - name: Build Tauri app
+        run: npm run tauri build
+
+      # ── Upload release artifacts ──────────────────────────────────────────
+      - name: Upload macOS artifacts
+        if: matrix.platform == 'macos'
+        uses: actions/upload-artifact@v4
+        with:
+          name: SocketSweep-macOS
+          path: src-tauri/target/release/bundle/dmg/*.dmg
+
+      - name: Upload Linux artifacts
+        if: matrix.platform == 'linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: SocketSweep-Linux
+          path: |
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/appimage/*.AppImage
+
+      - name: Upload Windows artifacts
+        if: matrix.platform == 'windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: SocketSweep-Windows
+          path: |
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*.exe

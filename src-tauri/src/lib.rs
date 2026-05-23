@@ -30,6 +30,18 @@ use tauri::Manager;
 
 fn get_bundled_binary(app: &tauri::AppHandle, name: &str) -> Result<std::path::PathBuf, String> {
     let resource_dir = app.path().resource_dir().map_err(|e| format!("Failed to get resource dir: {}", e))?;
+
+    // On Windows, host-native binaries like ADB use a .exe extension.
+    // Try the .exe variant first, then fall back to the extensionless name
+    // (needed for cross-platform binaries like the Android daemon).
+    #[cfg(target_os = "windows")]
+    {
+        let exe_path = resource_dir.join("bin").join(format!("{name}.exe"));
+        if exe_path.exists() {
+            return Ok(exe_path);
+        }
+    }
+
     let path = resource_dir.join("bin").join(name);
     if path.exists() {
         Ok(path)
