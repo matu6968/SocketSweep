@@ -29,11 +29,12 @@ By pushing a custom C++ daemon directly to your Android device via ADB and commu
 
 ## 📥 Downloads
 
-**[Download SocketSweep v1.0.0 for macOS](https://github.com/VishnuSrivatsava/SocketSweep/releases/tag/v1.0.0)**
+**[Download SocketSweep v1.0.0](https://github.com/VishnuSrivatsava/SocketSweep/releases/tag/v1.0.0)**
 
-- [📱 MacOS (.dmg)](https://github.com/VishnuSrivatsava/SocketSweep/releases/tag/v1.0.0)
-- [🪟 Windows (.exe)]() *(Coming Soon)*
-- [🐧 Linux (.AppImage)]() *(Coming Soon)*
+* **🪟 Windows:** [Standard Installer (.exe)](https://github.com/VishnuSrivatsava/SocketSweep/releases/tag/v1.0.0) | [Enterprise Package (.msi)](https://github.com/VishnuSrivatsava/SocketSweep/releases/tag/v1.0.0)
+* **🍎 macOS (Apple Silicon):** [Disk Image (.dmg)](https://github.com/VishnuSrivatsava/SocketSweep/releases/tag/v1.0.0)
+  * *Note: Since the macOS build is ad-hoc signed, please run `xattr -cr /Applications/SocketSweep.app` in your Terminal once after moving the app to your Applications folder.*
+* **🐧 Linux:** [Standalone AppImage](https://github.com/VishnuSrivatsava/SocketSweep/releases/tag/v1.0.0) | [Debian/Ubuntu Package (.deb)](https://github.com/VishnuSrivatsava/SocketSweep/releases/tag/v1.0.0)
 
 ---
 
