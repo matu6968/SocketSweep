@@ -14,6 +14,15 @@
 
 By pushing a custom C++ daemon directly to your Android device via ADB and communicating over a local TCP tunnel, SocketSweep achieves near-instantaneous filesystem traversals and deletions. If you have ever waited minutes just to see the contents of your Android's `/sdcard` directory over a USB cable, SocketSweep is the ultimate, blazing-fast alternative.
 
+<div align="center">
+  <h3>📺 Watch the Full Architecture Breakdown</h3>
+  <a href="https://youtu.be/ttsc6Xf6Xb4">
+    <img src="https://img.youtube.com/vi/ttsc6Xf6Xb4/maxresdefault.jpg" alt="SocketSweep Demo Video" width="70%" />
+  </a>
+  <br />
+  <a href="https://youtu.be/ttsc6Xf6Xb4"><strong>▶ USB File Transfer is Broken. So I Built My Own Protocol.</strong></a>
+</div>
+
 ---
 
 ## 📸 Screenshots
@@ -161,3 +170,5 @@ SocketSweep is released under the **GNU General Public License v3.0**. See the [
 ## 👋 Author
 
 Built by **Vishnu Srivatsava**. Currently looking for Backend / Systems Engineering roles. Feel free to reach out on [LinkedIn](https://www.linkedin.com/in/vishnu-srivatsava-642222238/) or via [email](mailto:vishnusrivatsava@gmail.com).
+
+📺 **[Watch the full demo & architecture breakdown on YouTube](https://youtu.be/ttsc6Xf6Xb4)**
