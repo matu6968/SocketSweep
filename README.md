@@ -8,6 +8,8 @@
   <img src="https://img.shields.io/badge/React-19-61DAFB.svg?logo=react&logoColor=black" alt="React 19" />
   <img src="https://img.shields.io/badge/C%2B%2B-17-00599C.svg?logo=c%2B%2B&logoColor=white" alt="C++17" />
   <img src="https://img.shields.io/badge/Rust-1.70+-000000.svg?logo=rust&logoColor=white" alt="Rust" />
+  <br />
+  <a href="https://github.com/sponsors/VishnuSrivatsava"><img src="https://img.shields.io/badge/♥_Sponsor-EA4AAA?style=for-the-badge&logo=github-sponsors&logoColor=white" alt="Sponsor" /></a>
 </div>
 
 <br />
@@ -158,6 +160,18 @@ If your device still refuses to scan `/sdcard`, ensure that you haven't blocked 
 
 ### Daemon Fails to Start
 If the daemon is killed immediately or throws `Permission denied`, ensure it is being executed from `/data/local/tmp/`. Modern Android versions prevent executing binaries stored directly on the `/sdcard/`. SocketSweep handles this automatically by pushing to `/data/local/tmp/socketsweep_daemon`.
+
+---
+
+## 💖 Support This Project
+
+If SocketSweep saved you from the nightmare of MTP, consider supporting its development:
+
+<div align="center">
+  <a href="https://github.com/sponsors/VishnuSrivatsava"><img src="https://img.shields.io/badge/♥_Sponsor_on_GitHub-EA4AAA?style=for-the-badge&logo=github-sponsors&logoColor=white" alt="Sponsor on GitHub" /></a>
+  &nbsp;&nbsp;
+  <a href="https://paypal.me/mathcuber"><img src="https://img.shields.io/badge/PayPal-00457C?style=for-the-badge&logo=paypal&logoColor=white" alt="PayPal" /></a>
+</div>
 
 ---
 
