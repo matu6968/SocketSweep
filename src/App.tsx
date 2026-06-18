@@ -58,6 +58,50 @@ function findNodeByPath(root: FileNode, targetPath: string): FileNode | null {
   return null;
 }
 
+function countNodeStats(node: FileNode): { size: number; files: number; dirs: number } {
+  if (node.type === "file") {
+    return { size: node.size, files: 1, dirs: 0 };
+  }
+  let files = 0;
+  let dirs = 1;
+  if (node.children) {
+    for (const child of node.children) {
+      const stats = countNodeStats(child);
+      files += stats.files;
+      dirs += stats.dirs;
+    }
+  }
+  return { size: node.size, files, dirs };
+}
+
+function removeNodeByPath(
+  root: FileNode,
+  targetPath: string
+): { removed: boolean; size: number; files: number; dirs: number } {
+  if (!root.children) return { removed: false, size: 0, files: 0, dirs: 0 };
+
+  const index = root.children.findIndex((child) => child.path === targetPath);
+  if (index !== -1) {
+    const node = root.children[index];
+    const stats = countNodeStats(node);
+    root.children.splice(index, 1);
+    root.size -= stats.size;
+    return { removed: true, ...stats };
+  }
+
+  for (const child of root.children) {
+    if (targetPath.startsWith(child.path + "/")) {
+      const result = removeNodeByPath(child, targetPath);
+      if (result.removed) {
+        root.size -= result.size;
+        return result;
+      }
+    }
+  }
+
+  return { removed: false, size: 0, files: 0, dirs: 0 };
+}
+
 // ── Icons (inline SVG) ──────────────────────────────────────────────────────
 
 function IconFolder({ className = "" }: { className?: string }) {
@@ -687,7 +731,19 @@ function App() {
       if (parsed.status === "ok") {
         pushToast(`Successfully deleted ${name}`, "success");
         addLog(`[DELETE] Success: ${parsed.message}`);
-        handleRescan();
+
+        // Update tree client-side instead of doing a full re-scan
+        if (scanData) {
+          const updated = JSON.parse(JSON.stringify(scanData)) as ScanResponse;
+          const result = removeNodeByPath(updated.tree, path);
+          if (result.removed) {
+            updated.total_files -= result.files;
+            updated.total_dirs -= result.dirs;
+            updated.total_size -= result.size;
+            addLog(`[DELETE] Tree updated locally (removed ${result.files} files, ${result.dirs} dirs, ${formatBytes(result.size)})`);
+          }
+          setScanData(updated);
+        }
       } else {
         throw new Error(parsed.message || "Unknown error");
       }
@@ -696,7 +752,7 @@ function App() {
       pushToast(`Delete failed: ${message}`, "error");
       addLog(`[ERROR] Delete failed: ${message}`);
     }
-  }, [confirmDelete, pushToast, addLog, handleRescan]);
+  }, [confirmDelete, pushToast, addLog, scanData]);
 
   useEffect(() => {
     const timers = timerRefs.current;

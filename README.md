@@ -46,7 +46,9 @@ This is because **MTP (Media Transfer Protocol)** — the protocol your OS uses 
 
 Full `/sdcard` scan on a **Samsung Galaxy S24 Ultra (256GB)** with ~47,000 files:
 
-> **SocketSweep: ~6.9 seconds** — full interactive treemap ready to explore.
+> **SocketSweep: ~6-15 seconds** — full interactive treemap ready to explore.
+
+Scan time varies depending on device load (background apps, media indexing, thermal state). Best case was 6.9 seconds with a warm cache and minimal background activity.
 
 For comparison, doing the same thing over MTP (plugging in the phone and browsing via Windows Explorer or Finder) typically involves minutes of "Calculating size..." freezes, and macOS Finder doesn't even show folder sizes at all.
 
