@@ -14,6 +14,7 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::process::Command;
+use std::sync::Mutex;
 use std::time::Duration;
 
 // ── Constants ───────────────────────────────────────────────────────────────
@@ -23,6 +24,9 @@ const DAEMON_ADDR: &str = "127.0.0.1:5050";
 const DEVICE_BIN_PATH: &str = "/data/local/tmp/socketsweep_daemon";
 const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const TCP_READ_TIMEOUT: Duration = Duration::from_secs(120); // scans can be slow
+
+/// Tracks the root path of the last successful scan so we can prevent its deletion.
+static SCAN_ROOT: Mutex<Option<String>> = Mutex::new(None);
 
 // ── Resource Resolution ─────────────────────────────────────────────────────
 
@@ -191,11 +195,19 @@ fn init_daemon(app: tauri::AppHandle) -> Result<String, String> {
 
 #[tauri::command]
 fn run_scan(path: Option<String>) -> Result<String, String> {
-    let cmd = match path {
-        Some(ref p) if !p.is_empty() => format!("SCAN {p}"),
-        _ => "SCAN".to_string(),
+    let effective_root = match path {
+        Some(ref p) if !p.is_empty() => p.clone(),
+        _ => "/sdcard".to_string(), // daemon default
     };
-    daemon_command(&cmd)
+    let cmd = format!("SCAN {effective_root}");
+    let response = daemon_command(&cmd)?;
+
+    // Store the scan root so delete_item can guard against it.
+    if let Ok(mut root) = SCAN_ROOT.lock() {
+        *root = Some(effective_root);
+    }
+
+    Ok(response)
 }
 
 #[tauri::command]
@@ -214,6 +226,14 @@ fn stop_daemon(app: tauri::AppHandle) -> Result<String, String> {
 
 #[tauri::command]
 fn delete_item(path: String) -> Result<String, String> {
+    // Prevent deletion of the scan root directory.
+    if let Ok(root) = SCAN_ROOT.lock() {
+        if let Some(ref scan_root) = *root {
+            if path == *scan_root {
+                return Err("Cannot delete the scan root directory.".into());
+            }
+        }
+    }
     daemon_command(&format!("DELETE {path}"))
 }
 

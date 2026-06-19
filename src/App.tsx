@@ -394,20 +394,22 @@ function FileTreeNode({
           {formatBytes(node.size)}
         </span>
 
-        <button
-          className="btn-nuke opacity-0 group-hover:opacity-100 ml-1 px-2 py-1 rounded-md
-            bg-danger-600/20 border border-danger-500/30 text-danger-400
-            hover:bg-danger-500/30 hover:text-danger-400 text-[10px] uppercase font-bold tracking-wider flex items-center gap-1
-            cursor-pointer"
-          onClick={(e) => {
-            e.stopPropagation();
-            onNuke(node.path, node.name);
-          }}
-          title={`Delete ${node.name}`}
-        >
-          <IconNuke />
-          <span className="hidden sm:inline">Delete</span>
-        </button>
+        {depth > 0 && (
+          <button
+            className="btn-nuke opacity-0 group-hover:opacity-100 ml-1 px-2 py-1 rounded-md
+              bg-danger-600/20 border border-danger-500/30 text-danger-400
+              hover:bg-danger-500/30 hover:text-danger-400 text-[10px] uppercase font-bold tracking-wider flex items-center gap-1
+              cursor-pointer"
+            onClick={(e) => {
+              e.stopPropagation();
+              onNuke(node.path, node.name);
+            }}
+            title={`Delete ${node.name}`}
+          >
+            <IconNuke />
+            <span className="hidden sm:inline">Delete</span>
+          </button>
+        )}
       </div>
 
       {isDir && open && node.children && (
@@ -723,6 +725,13 @@ function App() {
     if (!confirmDelete) return;
     const { path, name } = confirmDelete;
     setConfirmDelete(null);
+
+    // Guard: never delete the scan root
+    if (scanData && path === scanData.tree.path) {
+      pushToast("Cannot delete the scan root directory.", "error");
+      addLog(`[DELETE] Blocked: ${path} is the scan root.`);
+      return;
+    }
 
     addLog(`[DELETE] Requesting deletion of ${path}...`);
     try {
