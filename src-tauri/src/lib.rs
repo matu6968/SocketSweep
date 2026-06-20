@@ -59,15 +59,56 @@ fn get_bundled_binary(app: &tauri::AppHandle, name: &str) -> Result<std::path::P
 /// Run an ADB command and return its stdout. Maps any failure to a
 /// human-readable `Err(String)`.
 fn adb(adb_path: &std::path::Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new(adb_path)
+    use std::io::Read;
+    use std::time::{Duration, Instant};
+
+    let mut child = Command::new(adb_path)
         .args(args)
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .map_err(|e| format!("Failed to execute adb binary at {:?}: {}", adb_path, e))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let mut stdout_pipe = child.stdout.take().unwrap();
+    let mut stderr_pipe = child.stderr.take().unwrap();
 
-    if !output.status.success() {
+    let stdout_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut buf);
+        buf
+    });
+
+    let stderr_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut buf);
+        buf
+    });
+
+    let timeout_secs = 15;
+    let timeout = Duration::from_secs(timeout_secs);
+    let start = Instant::now();
+    let status;
+
+    loop {
+        if let Some(s) = child.try_wait().map_err(|e| format!("Failed to wait on adb process: {}", e))? {
+            status = s;
+            break;
+        }
+        if start.elapsed() > timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("ADB command timed out after {} seconds. Please reconnect your device and try again.", timeout_secs));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let stdout_bytes = stdout_thread.join().unwrap_or_default();
+    let stderr_bytes = stderr_thread.join().unwrap_or_default();
+
+    let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
+    let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
+
+    if !status.success() {
         let combined = format!("{stdout} {stderr}").to_lowercase();
         if combined.contains("no devices") || combined.contains("device not found") {
             return Err("No Android device detected. Connect your phone via USB and enable USB Debugging.".into());
@@ -78,7 +119,7 @@ fn adb(adb_path: &std::path::Path, args: &[&str]) -> Result<String, String> {
         return Err(format!(
             "adb {} failed (exit {}):\n{stderr}",
             args.join(" "),
-            output.status.code().unwrap_or(-1)
+            status.code().unwrap_or(-1)
         ));
     }
 
