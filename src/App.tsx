@@ -58,6 +58,28 @@ function findNodeByPath(root: FileNode, targetPath: string): FileNode | null {
   return null;
 }
 
+function buildBreadcrumbs(root: FileNode, targetPath: string): { name: string; path: string }[] {
+  const breadcrumbs: { name: string; path: string }[] = [];
+  let current: FileNode | null = root;
+
+  while (current) {
+    breadcrumbs.push({ name: current.name, path: current.path });
+    if (current.path === targetPath) break;
+
+    let next: FileNode | null = null;
+    if (current.children) {
+      for (const child of current.children) {
+        if (targetPath === child.path || targetPath.startsWith(child.path + "/")) {
+          next = child;
+          break;
+        }
+      }
+    }
+    current = next;
+  }
+  return breadcrumbs;
+}
+
 function countNodeStats(node: FileNode): { size: number; files: number; dirs: number } {
   if (node.type === "file") {
     return { size: node.size, files: 1, dirs: 0 };
@@ -509,6 +531,8 @@ function ResultScreen({
       path: c.path,
     }));
 
+  const breadcrumbs = buildBreadcrumbs(data.tree, zoomPath);
+
   return (
     <div className="flex flex-col h-full animate-fade-in-up">
       {/* Top bar */}
@@ -516,9 +540,21 @@ function ResultScreen({
         <div className="flex items-center gap-3">
           <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
           <h1 className="text-base font-semibold text-zinc-200 tracking-tight">SocketSweep</h1>
-          <span className="text-xs text-zinc-600 font-mono">
-            {zoomPath === data.tree.path ? `/ ${data.tree.name}` : `/ ${renderNode.name}`}
-          </span>
+          <div className="flex items-center text-xs text-zinc-500 font-mono">
+            {breadcrumbs.map((crumb, idx) => (
+              <span key={crumb.path} className="inline-flex items-center">
+                <button 
+                  onClick={() => setZoomPath(crumb.path)}
+                  className={`hover:text-zinc-300 transition-colors ${idx === breadcrumbs.length - 1 ? 'text-zinc-300 font-semibold' : ''}`}
+                >
+                  {crumb.name}
+                </button>
+                {idx < breadcrumbs.length - 1 && (
+                  <span className="mx-2 opacity-50">&gt;</span>
+                )}
+              </span>
+            ))}
+          </div>
         </div>
         <div className="flex items-center gap-2">
           {zoomPath !== data.tree.path && (
