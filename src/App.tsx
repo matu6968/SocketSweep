@@ -1,5 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
 import { Treemap, ResponsiveContainer, Tooltip as RechartsTooltip } from "recharts";
 import "./App.css";
 
@@ -31,6 +33,31 @@ interface Toast {
 }
 
 type AppPhase = "setup" | "connecting" | "scanning" | "result";
+
+interface UploadProgress {
+  file: string;
+  dest_path: string;
+  bytes_sent: number;
+  total: number;
+  percent: number;
+  file_index: number;
+  file_count: number;
+}
+
+interface DownloadProgress {
+  device_path: string;
+  local_path: string;
+  bytes_received: number;
+  total: number;
+  percent: number;
+  file_index: number;
+  file_count: number;
+}
+
+interface DownloadEntry {
+  device_path: string;
+  relative_path: string;
+}
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -124,6 +151,23 @@ function removeNodeByPath(
   return { removed: false, size: 0, files: 0, dirs: 0 };
 }
 
+function collectDownloadEntries(node: FileNode, rootPath: string): DownloadEntry[] {
+  if (node.type === "file") {
+    const relativePath = node.path.startsWith(rootPath + "/")
+      ? node.path.slice(rootPath.length + 1)
+      : node.name;
+    return [{ device_path: node.path, relative_path: relativePath }];
+  }
+
+  const entries: DownloadEntry[] = [];
+  if (node.children) {
+    for (const child of node.children) {
+      entries.push(...collectDownloadEntries(child, rootPath));
+    }
+  }
+  return entries;
+}
+
 // ── Icons (inline SVG) ──────────────────────────────────────────────────────
 
 function IconFolder({ className = "" }: { className?: string }) {
@@ -167,6 +211,24 @@ function IconNuke() {
     <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round">
       <path d="M2 3.5h10M5.5 3.5V2.5a1 1 0 011-1h1a1 1 0 011 1v1M3.5 3.5l.5 8.5a1 1 0 001 1h4a1 1 0 001-1l.5-8.5"/>
       <path d="M5.5 6v4M8.5 6v4"/>
+    </svg>
+  );
+}
+
+function IconUpload({ className = "" }: { className?: string }) {
+  return (
+    <svg className={className} width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M7 9V2.5M7 2.5L4.5 5M7 2.5L9.5 5"/>
+      <path d="M2.5 9v2a1 1 0 001 1h7a1 1 0 001-1V9"/>
+    </svg>
+  );
+}
+
+function IconDownload({ className = "" }: { className?: string }) {
+  return (
+    <svg className={className} width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M7 2.5V9M7 9L4.5 6.5M7 9L9.5 6.5"/>
+      <path d="M2.5 9v2a1 1 0 001 1h7a1 1 0 001-1V9"/>
     </svg>
   );
 }
@@ -361,12 +423,16 @@ function FileTreeNode({
   depth,
   onNuke,
   onZoom,
+  onDownload,
+  busy,
 }: {
   node: FileNode;
   parentSize: number;
   depth: number;
   onNuke: (path: string, name: string) => void;
   onZoom: (path: string) => void;
+  onDownload: (node: FileNode) => void;
+  busy: boolean;
 }) {
   const [open, setOpen] = useState(depth < 1);
   const isDir = node.type === "directory";
@@ -418,10 +484,29 @@ function FileTreeNode({
 
         {depth > 0 && (
           <button
+            className="opacity-0 group-hover:opacity-100 ml-1 px-2 py-1 rounded-md
+              bg-sky-600/20 border border-sky-500/30 text-sky-400
+              hover:bg-sky-500/30 text-[10px] uppercase font-bold tracking-wider flex items-center gap-1
+              cursor-pointer disabled:opacity-30"
+            disabled={busy}
+            onClick={(e) => {
+              e.stopPropagation();
+              onDownload(node);
+            }}
+            title={`Download ${node.name}`}
+          >
+            <IconDownload />
+            <span className="hidden sm:inline">Save</span>
+          </button>
+        )}
+
+        {depth > 0 && (
+          <button
             className="btn-nuke opacity-0 group-hover:opacity-100 ml-1 px-2 py-1 rounded-md
               bg-danger-600/20 border border-danger-500/30 text-danger-400
               hover:bg-danger-500/30 hover:text-danger-400 text-[10px] uppercase font-bold tracking-wider flex items-center gap-1
-              cursor-pointer"
+              cursor-pointer disabled:opacity-30"
+            disabled={busy}
             onClick={(e) => {
               e.stopPropagation();
               onNuke(node.path, node.name);
@@ -444,6 +529,8 @@ function FileTreeNode({
               depth={depth + 1}
               onNuke={onNuke}
               onZoom={onZoom}
+              onDownload={onDownload}
+              busy={busy}
             />
           ))}
         </div>
@@ -506,13 +593,24 @@ function ResultScreen({
   onRescan,
   onDisconnect,
   onNuke,
+  onUpload,
+  onDownload,
+  busy,
+  uploadProgress,
+  downloadProgress,
 }: {
   data: ScanResponse;
   onRescan: () => void;
   onDisconnect: () => void;
   onNuke: (path: string, name: string) => void;
+  onUpload: (localPaths: string[], destDir: string) => void;
+  onDownload: (node: FileNode) => void;
+  busy: boolean;
+  uploadProgress: UploadProgress | null;
+  downloadProgress: DownloadProgress | null;
 }) {
   const [zoomPath, setZoomPath] = useState<string>(data.tree.path);
+  const [destDir, setDestDir] = useState<string>(data.tree.path);
   
   // Find node to render based on zoom
   const renderNode = findNodeByPath(data.tree, zoomPath) || data.tree;
@@ -532,6 +630,30 @@ function ResultScreen({
     }));
 
   const breadcrumbs = buildBreadcrumbs(data.tree, zoomPath);
+
+  const pickFiles = async () => {
+    const selected = await open({
+      multiple: true,
+      title: "Select files to upload",
+    });
+    if (!selected) return;
+    const paths = Array.isArray(selected) ? selected : [selected];
+    onUpload(paths, destDir.trim() || zoomPath);
+  };
+
+  const pickFolder = async () => {
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      title: "Select folder to upload",
+    });
+    if (!selected || Array.isArray(selected)) return;
+    onUpload([selected], destDir.trim() || zoomPath);
+  };
+
+  const downloadCurrentFolder = () => {
+    onDownload(renderNode);
+  };
 
   return (
     <div className="flex flex-col h-full animate-fade-in-up">
@@ -568,16 +690,47 @@ function ResultScreen({
           <button
             id="btn-rescan"
             onClick={onRescan}
+            disabled={busy}
             className="px-3 py-1.5 rounded-lg text-xs font-medium bg-zinc-800 text-zinc-300
-              hover:bg-zinc-700 hover:text-zinc-100 border border-zinc-700/50"
+              hover:bg-zinc-700 hover:text-zinc-100 border border-zinc-700/50 disabled:opacity-50"
           >
             ↻ Rescan
           </button>
           <button
+            id="btn-download-folder"
+            onClick={downloadCurrentFolder}
+            disabled={busy}
+            className="px-3 py-1.5 rounded-lg text-xs font-medium bg-sky-600/20 text-sky-300
+              hover:bg-sky-600/30 border border-sky-500/30 disabled:opacity-50 inline-flex items-center gap-1.5"
+          >
+            <IconDownload />
+            Download Folder
+          </button>
+          <button
+            id="btn-upload-files"
+            onClick={pickFiles}
+            disabled={busy}
+            className="px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-600/20 text-accent-300
+              hover:bg-accent-600/30 border border-accent-500/30 disabled:opacity-50 inline-flex items-center gap-1.5"
+          >
+            <IconUpload />
+            Upload Files
+          </button>
+          <button
+            id="btn-upload-folder"
+            onClick={pickFolder}
+            disabled={busy}
+            className="px-3 py-1.5 rounded-lg text-xs font-medium bg-zinc-800 text-zinc-300
+              hover:bg-zinc-700 hover:text-zinc-100 border border-zinc-700/50 disabled:opacity-50"
+          >
+            Upload Folder
+          </button>
+          <button
             id="btn-disconnect"
             onClick={onDisconnect}
+            disabled={busy}
             className="px-3 py-1.5 rounded-lg text-xs font-medium bg-zinc-800 text-zinc-400
-              hover:bg-red-950/50 hover:text-red-400 border border-zinc-700/50"
+              hover:bg-red-950/50 hover:text-red-400 border border-zinc-700/50 disabled:opacity-50"
           >
             Disconnect
           </button>
@@ -591,6 +744,76 @@ function ResultScreen({
         <StatCard label="Directories" value={formatNumber(data.total_dirs)} />
         <StatCard label="Scan Time" value={`${data.scan_time_ms}ms`} />
       </div>
+
+      <div className="px-6 pb-3 shrink-0">
+        <div className="glass-card rounded-xl px-4 py-3 flex flex-col sm:flex-row sm:items-center gap-3">
+          <label className="text-xs font-semibold text-zinc-500 uppercase tracking-wider shrink-0">
+            Upload Destination
+          </label>
+          <input
+            type="text"
+            value={destDir}
+            onChange={(e) => setDestDir(e.target.value)}
+            disabled={busy}
+            className="flex-1 bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm font-mono text-zinc-200
+              focus:outline-none focus:border-accent-500/50 disabled:opacity-50"
+            placeholder="/sdcard/Download"
+          />
+          <button
+            onClick={() => setDestDir(zoomPath)}
+            disabled={busy}
+            className="px-3 py-2 rounded-lg text-xs font-medium bg-zinc-800 text-zinc-300 hover:bg-zinc-700 disabled:opacity-50 shrink-0"
+          >
+            Use Current Folder
+          </button>
+        </div>
+      </div>
+
+      {busy && uploadProgress && (
+        <div className="px-6 pb-3 shrink-0">
+          <div className="glass-card rounded-xl px-4 py-3">
+            <div className="flex items-center justify-between gap-3 mb-2">
+              <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">
+                Uploading {uploadProgress.file_index}/{uploadProgress.file_count}
+              </span>
+              <span className="text-xs font-mono text-zinc-500">
+                {formatBytes(uploadProgress.bytes_sent)} / {formatBytes(uploadProgress.total)}
+              </span>
+            </div>
+            <p className="text-sm text-zinc-300 truncate mb-1">{uploadProgress.file.split(/[/\\]/).pop()}</p>
+            <p className="text-xs text-zinc-600 font-mono truncate mb-3">{uploadProgress.dest_path}</p>
+            <div className="h-2 bg-zinc-900 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-accent-500 transition-all duration-150"
+                style={{ width: `${Math.min(uploadProgress.percent, 100)}%` }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {busy && downloadProgress && (
+        <div className="px-6 pb-3 shrink-0">
+          <div className="glass-card rounded-xl px-4 py-3">
+            <div className="flex items-center justify-between gap-3 mb-2">
+              <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">
+                Downloading {downloadProgress.file_index}/{downloadProgress.file_count}
+              </span>
+              <span className="text-xs font-mono text-zinc-500">
+                {formatBytes(downloadProgress.bytes_received)} / {formatBytes(downloadProgress.total)}
+              </span>
+            </div>
+            <p className="text-sm text-zinc-300 truncate mb-1">{downloadProgress.device_path.split("/").pop()}</p>
+            <p className="text-xs text-zinc-600 font-mono truncate mb-3">{downloadProgress.local_path}</p>
+            <div className="h-2 bg-zinc-900 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-sky-500 transition-all duration-150"
+                style={{ width: `${Math.min(downloadProgress.percent, 100)}%` }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Treemap */}
       <div className="px-6 mb-4 shrink-0 h-48">
@@ -639,6 +862,8 @@ function ResultScreen({
           depth={0}
           onNuke={onNuke}
           onZoom={setZoomPath}
+          onDownload={onDownload}
+          busy={busy}
         />
       </div>
     </div>
@@ -751,6 +976,30 @@ function App() {
   }, [pushToast, addLog]);
 
   const [confirmDelete, setConfirmDelete] = useState<{path: string, name: string} | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null);
+  const [downloading, setDownloading] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState<DownloadProgress | null>(null);
+  const busy = uploading || downloading;
+
+  useEffect(() => {
+    let unlistenUpload: (() => void) | undefined;
+    let unlistenDownload: (() => void) | undefined;
+    listen<UploadProgress>("upload-progress", (event) => {
+      setUploadProgress(event.payload);
+    }).then((fn) => {
+      unlistenUpload = fn;
+    });
+    listen<DownloadProgress>("download-progress", (event) => {
+      setDownloadProgress(event.payload);
+    }).then((fn) => {
+      unlistenDownload = fn;
+    });
+    return () => {
+      unlistenUpload?.();
+      unlistenDownload?.();
+    };
+  }, []);
 
   // ── Nuke (Delete) ───────────────────────────────────────────────────────
   const handleNuke = useCallback((path: string, name: string) => {
@@ -799,6 +1048,112 @@ function App() {
     }
   }, [confirmDelete, pushToast, addLog, scanData]);
 
+  const handleUpload = useCallback(async (localPaths: string[], destDir: string) => {
+    if (localPaths.length === 0) return;
+
+    const destination = destDir.trim();
+    if (!destination.startsWith("/sdcard") && !destination.startsWith("/storage/emulated/0")) {
+      pushToast("Destination must be under /sdcard or /storage/emulated/0", "error");
+      return;
+    }
+
+    setUploading(true);
+    setUploadProgress(null);
+    addLog(`[UPLOAD] Starting upload of ${localPaths.length} item(s) to ${destination}...`);
+
+    try {
+      const raw = await invoke<string>("upload_files", {
+        localPaths,
+        destDir: destination,
+      });
+      const parsed = JSON.parse(raw);
+
+      if (parsed.status === "ok") {
+        pushToast(
+          `Uploaded ${parsed.uploaded} file(s) (${formatBytes(parsed.total_bytes)})`,
+          "success"
+        );
+        addLog(`[UPLOAD] Success: ${parsed.uploaded} file(s), ${formatBytes(parsed.total_bytes)}.`);
+      } else {
+        pushToast(
+          `Upload finished with ${parsed.failed} failure(s) (${parsed.uploaded} succeeded)`,
+          parsed.uploaded > 0 ? "info" : "error"
+        );
+        addLog(`[UPLOAD] Partial: ${parsed.uploaded} ok, ${parsed.failed} failed.`);
+      }
+
+      if (parsed.uploaded > 0) {
+        setPhase("scanning");
+        setStatusText("Re-scanning after upload…");
+        const scanRaw = await invoke<string>("run_scan", { path: "/sdcard" });
+        const scanParsed: ScanResponse = JSON.parse(scanRaw);
+        setScanData(scanParsed);
+        setPhase("result");
+        addLog("[SCAN] Re-scan complete after upload.");
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      pushToast(`Upload failed: ${message}`, "error");
+      addLog(`[ERROR] Upload failed: ${message}`);
+    } finally {
+      setUploading(false);
+      setUploadProgress(null);
+    }
+  }, [pushToast, addLog]);
+
+  const handleDownload = useCallback(async (node: FileNode) => {
+    const entries = collectDownloadEntries(node, node.path);
+    if (entries.length === 0) {
+      pushToast("Nothing to download in this selection.", "error");
+      return;
+    }
+
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      title: "Choose download destination on your PC",
+    });
+    if (!selected || Array.isArray(selected)) return;
+
+    setDownloading(true);
+    setDownloadProgress(null);
+    addLog(`[DOWNLOAD] Starting download of ${entries.length} file(s) to ${selected}...`);
+
+    try {
+      const raw = await invoke<string>("download_files", {
+        entries,
+        destDir: selected,
+      });
+      const parsed = JSON.parse(raw);
+
+      if (parsed.status === "ok") {
+        pushToast(
+          `Downloaded ${parsed.downloaded} file(s) (${formatBytes(parsed.total_bytes)})`,
+          "success"
+        );
+        addLog(`[DOWNLOAD] Success: ${parsed.downloaded} file(s), ${formatBytes(parsed.total_bytes)}.`);
+      } else {
+        pushToast(
+          `Download finished with ${parsed.failed} failure(s) (${parsed.downloaded} succeeded)`,
+          parsed.downloaded > 0 ? "info" : "error"
+        );
+        addLog(`[DOWNLOAD] Partial: ${parsed.downloaded} ok, ${parsed.failed} failed.`);
+        for (const file of parsed.files ?? []) {
+          if (file.status === "error" && file.message) {
+            addLog(`[DOWNLOAD] Failed ${file.device_path}: ${file.message}`);
+          }
+        }
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      pushToast(`Download failed: ${message}`, "error");
+      addLog(`[ERROR] Download failed: ${message}`);
+    } finally {
+      setDownloading(false);
+      setDownloadProgress(null);
+    }
+  }, [pushToast, addLog]);
+
   useEffect(() => {
     const timers = timerRefs.current;
     return () => { timers.forEach((t) => clearTimeout(t)); };
@@ -818,6 +1173,11 @@ function App() {
             onRescan={handleRescan}
             onDisconnect={handleDisconnect}
             onNuke={handleNuke}
+            onUpload={handleUpload}
+            onDownload={handleDownload}
+            busy={busy}
+            uploadProgress={uploadProgress}
+            downloadProgress={downloadProgress}
           />
         )}
       </div>

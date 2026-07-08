@@ -12,12 +12,15 @@
 
 #include <arpa/inet.h>
 #include <dirent.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <signal.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <cerrno>
+#include <fstream>
 #include <filesystem>
 #include <iostream>
 
@@ -97,6 +100,94 @@ static std::string trim(std::string s) {
     while (!s.empty() && s.back()  == ' ') s.pop_back();
     size_t start = s.find_first_not_of(' ');
     return (start == std::string::npos) ? "" : s.substr(start);
+}
+
+static bool recv_all(int fd, char* p, size_t left) {
+    while (left > 0) {
+        ssize_t n = ::recv(fd, p, left, 0);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return false;
+        p    += n;
+        left -= static_cast<size_t>(n);
+    }
+    return true;
+}
+
+static int upload_timeout_sec(int64_t size_bytes) {
+    int64_t sec = 60 + (size_bytes / (1024 * 1024)) * 5;
+    if (sec > 3600) sec = 3600;
+    return static_cast<int>(sec);
+}
+
+static bool is_allowed_path(const std::string& path) {
+    if (path.rfind("/sdcard", 0) == 0) {
+        if (path.size() == 7 || path[7] == '/') return true;
+    }
+    if (path.rfind("/storage/emulated/0", 0) == 0) {
+        if (path.size() == 21 || path[21] == '/') return true;
+    }
+    return false;
+}
+
+static void set_recv_timeout(int fd, int sec) {
+    struct timeval tv { sec, 0 };
+    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+}
+
+static std::vector<std::string> tokenize(const std::string& s) {
+    std::vector<std::string> tokens;
+    std::string cur;
+    for (char c : s) {
+        if (c == ' ') {
+            if (!cur.empty()) {
+                tokens.push_back(cur);
+                cur.clear();
+            }
+        } else {
+            cur += c;
+        }
+    }
+    if (!cur.empty()) tokens.push_back(cur);
+    return tokens;
+}
+
+static void apply_file_times(const std::string& path,
+                             int64_t mtime_sec, int64_t mtime_nsec,
+                             int64_t atime_sec, int64_t atime_nsec)
+{
+    if (mtime_sec <= 0) return;
+
+    struct timespec ts[2]{};
+    if (atime_sec > 0) {
+        ts[0].tv_sec  = atime_sec;
+        ts[0].tv_nsec = atime_nsec;
+    } else {
+        ts[0].tv_sec  = mtime_sec;
+        ts[0].tv_nsec = mtime_nsec;
+    }
+    ts[1].tv_sec  = mtime_sec;
+    ts[1].tv_nsec = mtime_nsec;
+
+    if (::utimensat(AT_FDCWD, path.c_str(), ts, 0) != 0) {
+        std::fprintf(stderr, "[engine] utimensat failed for \"%s\": %s\n",
+                     path.c_str(), std::strerror(errno));
+    }
+}
+
+static void stat_times_to_json(JsonStream& out, const struct stat& info) {
+    int64_t mtime_sec  = info.st_mtim.tv_sec;
+    int64_t mtime_nsec = info.st_mtim.tv_nsec;
+    int64_t atime_sec  = info.st_atim.tv_sec;
+    int64_t atime_nsec = info.st_atim.tv_nsec;
+
+    out.write(",\"mtime_sec\":");
+    out.write(std::to_string(mtime_sec));
+    out.write(",\"mtime_nsec\":");
+    out.write(std::to_string(mtime_nsec));
+    out.write(",\"atime_sec\":");
+    out.write(std::to_string(atime_sec));
+    out.write(",\"atime_nsec\":");
+    out.write(std::to_string(atime_nsec));
 }
 
 // ── Data Model ──────────────────────────────────────────────────────────────
@@ -221,10 +312,150 @@ static FileNode scan(const std::string& path, const std::string& name,
     return node;
 }
 
+// ── Upload handler ──────────────────────────────────────────────────────────
+static void handle_put(int fd, JsonStream& out, const std::string& dest_path,
+                       int64_t size_bytes,
+                       int64_t mtime_sec, int64_t mtime_nsec,
+                       int64_t atime_sec, int64_t atime_nsec)
+{
+    if (!is_allowed_path(dest_path)) {
+        out.write("{\"status\":\"error\",\"message\":\"Path not allowed\"}\n");
+        return;
+    }
+    if (size_bytes < 0) {
+        out.write("{\"status\":\"error\",\"message\":\"Invalid size\"}\n");
+        return;
+    }
+
+    set_recv_timeout(fd, upload_timeout_sec(size_bytes));
+
+    std::error_code ec;
+    std::filesystem::path dest(dest_path);
+    auto parent = dest.parent_path();
+    if (!parent.empty()) {
+        std::filesystem::create_directories(parent, ec);
+        if (ec) {
+            out.write("{\"status\":\"error\",\"message\":\"");
+            json_escape_into(out, ec.message());
+            out.write("\"}\n");
+            return;
+        }
+    }
+
+    std::ofstream file(dest_path, std::ios::binary | std::ios::trunc);
+    if (!file) {
+        out.write("{\"status\":\"error\",\"message\":\"Failed to open destination file\"}\n");
+        return;
+    }
+
+    std::vector<char> buf(256 * 1024);
+    int64_t remaining = size_bytes;
+    int64_t written   = 0;
+
+    while (remaining > 0) {
+        size_t chunk = static_cast<size_t>(
+            remaining > static_cast<int64_t>(buf.size()) ? buf.size() : remaining);
+        if (!recv_all(fd, buf.data(), chunk)) {
+            file.close();
+            std::filesystem::remove(dest_path, ec);
+            out.write("{\"status\":\"error\",\"message\":\"Upload interrupted\"}\n");
+            return;
+        }
+        file.write(buf.data(), static_cast<std::streamsize>(chunk));
+        if (!file) {
+            file.close();
+            std::filesystem::remove(dest_path, ec);
+            out.write("{\"status\":\"error\",\"message\":\"Failed to write file\"}\n");
+            return;
+        }
+        remaining -= static_cast<int64_t>(chunk);
+        written   += static_cast<int64_t>(chunk);
+    }
+    file.close();
+
+    apply_file_times(dest_path, mtime_sec, mtime_nsec, atime_sec, atime_nsec);
+
+    std::fprintf(stderr, "[engine] PUT \"%s\" (%lld bytes)\n",
+                 dest_path.c_str(), (long long)written);
+
+    out.write("{\"status\":\"ok\",\"bytes_written\":");
+    out.write(std::to_string(written));
+    out.write(",\"path\":\"");
+    json_escape_into(out, dest_path);
+    out.write("\"}\n");
+}
+
+// ── Download handler ────────────────────────────────────────────────────────
+static void handle_get(int fd, const std::string& source_path) {
+    JsonStream out(fd);
+
+    if (!is_allowed_path(source_path)) {
+        out.write("{\"status\":\"error\",\"message\":\"Path not allowed\"}\n");
+        return;
+    }
+
+    struct stat info{};
+    if (::stat(source_path.c_str(), &info) != 0) {
+        out.write("{\"status\":\"error\",\"message\":\"File not found\"}\n");
+        return;
+    }
+    if (!S_ISREG(info.st_mode)) {
+        out.write("{\"status\":\"error\",\"message\":\"Not a file\"}\n");
+        return;
+    }
+
+    int64_t size_bytes = info.st_size;
+    if (size_bytes < 0) {
+        out.write("{\"status\":\"error\",\"message\":\"Invalid file size\"}\n");
+        return;
+    }
+
+    std::ifstream file(source_path, std::ios::binary);
+    if (!file) {
+        out.write("{\"status\":\"error\",\"message\":\"Failed to open source file\"}\n");
+        return;
+    }
+
+    out.write("{\"status\":\"ok\",\"size\":");
+    out.write(std::to_string(size_bytes));
+    out.write(",\"path\":\"");
+    json_escape_into(out, source_path);
+    out.write("\"");
+    stat_times_to_json(out, info);
+    out.write("}\n");
+    if (!out.flush()) {
+        return;
+    }
+
+    std::vector<char> buf(256 * 1024);
+    int64_t remaining = size_bytes;
+    int64_t sent      = 0;
+
+    while (remaining > 0) {
+        size_t chunk = static_cast<size_t>(
+            remaining > static_cast<int64_t>(buf.size()) ? buf.size() : remaining);
+        file.read(buf.data(), static_cast<std::streamsize>(chunk));
+        if (!file && !file.eof()) {
+            std::fprintf(stderr, "[engine] GET read error for \"%s\"\n", source_path.c_str());
+            return;
+        }
+        std::streamsize got = file.gcount();
+        if (got <= 0) break;
+        if (!JsonStream::send_all(fd, buf.data(), static_cast<size_t>(got))) {
+            std::fprintf(stderr, "[engine] GET send interrupted for \"%s\"\n", source_path.c_str());
+            return;
+        }
+        remaining -= got;
+        sent      += got;
+    }
+
+    std::fprintf(stderr, "[engine] GET \"%s\" (%lld bytes)\n",
+                 source_path.c_str(), (long long)sent);
+}
+
 // ── Command dispatch ────────────────────────────────────────────────────────
 static void handle_client(int fd) {
-    struct timeval tv { cfg::RECV_TIMEOUT_SEC, 0 };
-    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    set_recv_timeout(fd, cfg::RECV_TIMEOUT_SEC);
 
     std::string cmd = trim(recv_line(fd));
     if (cmd.empty()) return;
@@ -294,6 +525,39 @@ static void handle_client(int fd) {
         out.write(",\"tree\":");
         serialize_node(out, tree);
         out.write("}\n");
+    }
+    else if (cmd.rfind("GET ", 0) == 0) {
+        std::string source_path = trim(cmd.substr(4));
+        handle_get(fd, source_path);
+    }
+    else if (cmd.rfind("PUT ", 0) == 0) {
+        auto tokens = tokenize(trim(cmd.substr(4)));
+        if (tokens.size() < 2) {
+            out.write("{\"status\":\"error\",\"message\":\"Usage: PUT <path> <size> [mtime_sec mtime_nsec atime_sec atime_nsec]\"}\n");
+        } else {
+            int64_t mtime_sec = 0, mtime_nsec = 0, atime_sec = 0, atime_nsec = 0;
+            int64_t size_bytes = 0;
+            std::string dest_path;
+
+            if (tokens.size() >= 6) {
+                atime_nsec = std::strtoll(tokens.back().c_str(), nullptr, 10); tokens.pop_back();
+                atime_sec  = std::strtoll(tokens.back().c_str(), nullptr, 10); tokens.pop_back();
+                mtime_nsec = std::strtoll(tokens.back().c_str(), nullptr, 10); tokens.pop_back();
+                mtime_sec  = std::strtoll(tokens.back().c_str(), nullptr, 10); tokens.pop_back();
+                size_bytes = std::strtoll(tokens.back().c_str(), nullptr, 10); tokens.pop_back();
+            } else {
+                size_bytes = std::strtoll(tokens.back().c_str(), nullptr, 10); tokens.pop_back();
+            }
+
+            dest_path = tokens[0];
+            for (size_t i = 1; i < tokens.size(); ++i) {
+                dest_path += " ";
+                dest_path += tokens[i];
+            }
+
+            handle_put(fd, out, dest_path, size_bytes,
+                         mtime_sec, mtime_nsec, atime_sec, atime_nsec);
+        }
     }
     else {
         out.write("{\"status\":\"error\",\"message\":\"Unknown command\"}\n");

@@ -92,6 +92,8 @@ Go to **Settings → About Phone → tap "Build Number" 7 times** to unlock Deve
 3. Click **Connect** — the app will automatically push the daemon to your phone and set everything up
 4. Click **Scan** — your full storage treemap loads in seconds
 5. Click on any block in the treemap to drill down. Found something huge you don't need? Delete it right from the app.
+6. **Upload files back to your phone** — use **Upload Files** or **Upload Folder**, pick a destination path (defaults to the folder you're viewing), and transfer over the same fast ADB TCP tunnel (no MTP).
+7. **Download files to your PC** — click **Save** on any file or folder in the tree, or use **Download Folder** for the folder you're viewing. Pick a local destination and files stream over the same tunnel.
 
 That's it. No apps to install on your phone, no Wi-Fi setup, no root required.
 
@@ -171,7 +173,35 @@ sequenceDiagram
     Note over D: std::filesystem::remove_all
     D-->>R: {"status":"ok"}
     R-->>U: Update UI / Rescan
+
+    %% Upload Phase
+    U->>R: invoke("upload_files", { localPaths, destDir })
+    R->>D: TCP Send: `PUT /sdcard/... <size>\n` + binary stream
+    Note over D: create_directories + write file
+    D-->>R: {"status":"ok","bytes_written":…}
+    R->>A: MEDIA_SCANNER_SCAN_FILE broadcast
+    R-->>U: Progress events + rescan
+
+    %% Download Phase
+    U->>R: invoke("download_files", { entries, destDir })
+    R->>D: TCP Send: `GET /sdcard/... \n`
+    Note over D: read file + stream bytes
+    D-->>R: JSON header + binary stream
+    R-->>U: Progress events + result
 ```
+
+### Wire Protocol
+
+| Command (host → daemon) | Response | Behavior |
+|-------------------------|----------|----------|
+| `PING\n` | `{"status":"ok","message":"pong"}` | Health check |
+| `SCAN [path]\n` | Large JSON with tree | Recursive scan; default path `/sdcard` |
+| `PUT <path> <size> [mtime_sec mtime_nsec atime_sec atime_nsec]\n` + binary | `{"status":"ok","bytes_written":N,"path":"..."}` | Write file to device and preserve timestamps |
+| `GET <path>\n` | `{"status":"ok","size":N,"path":"...","mtime_sec":…}\n` + binary | Read file from device with timestamps |
+| `DELETE {path}\n` | `{"status":"ok","message":"Deleted N items"}` | `std::filesystem::remove_all` |
+| `SHUTDOWN\n` | `{"status":"ok","message":"shutting down"}` | Stops daemon loop |
+
+Uploads stream raw bytes over the same TCP tunnel after the `PUT` header line. Downloads send a JSON size header first, then raw file bytes. Paths must be under `/sdcard` or `/storage/emulated/0`. Folder uploads on the host and folder downloads from the scan tree preserve relative paths.
 
 ---
 
